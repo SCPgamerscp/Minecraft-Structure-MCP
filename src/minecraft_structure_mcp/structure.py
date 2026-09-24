@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from html import escape
 import hashlib
+import os
+import tempfile
 
 import nbtlib
 from nbtlib import Byte, Compound, Double, Int, List, String
@@ -34,17 +36,29 @@ def new(size: list[int], data_version: int = 3465) -> nbtlib.File:
     return nbtlib.File(root)
 
 
+def _palettes(root) -> list:
+    """Vanilla structures use either palette or alternate palettes, never both."""
+    if "palette" in root and "palettes" in root:
+        raise ValueError("Structure contains both palette and palettes")
+    if "palette" in root:
+        return [root["palette"]]
+    if "palettes" in root and root["palettes"]:
+        return list(root["palettes"])
+    raise ValueError("Expected vanilla structure palette or nonempty palettes")
+
+
 def check(root) -> tuple[int, int, int]:
     if not isinstance(root, Compound):
         raise ValueError("Root must be an NBT compound")
     size = _size([int(x) for x in root["size"]])
-    palettes = root.get("palette")
-    if palettes is None:
-        raise ValueError("Expected vanilla structure 'palette' (multi-palette structures unsupported)")
+    palettes = _palettes(root)
+    length = len(palettes[0])
+    if any(len(palette) != length for palette in palettes):
+        raise ValueError("All palette variants must have the same number of states")
     for block in root["blocks"]:
         if len(block["pos"]) != 3 or not all(0 <= int(c) < size[i] for i, c in enumerate(block["pos"])):
             raise ValueError("Block position is outside the structure")
-        if not 0 <= int(block["state"]) < len(palettes):
+        if not 0 <= int(block["state"]) < length:
             raise ValueError("Invalid block palette index")
     return size
 
@@ -59,7 +73,15 @@ def save(root: nbtlib.File, path: str | Path) -> None:
     check(root)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    root.save(str(target), gzipped=True)
+    # A failed write must not truncate an existing structure.
+    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    try:
+        root.save(temporary, gzipped=True)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def state(name: str, properties: dict[str, str] | None = None) -> Compound:
@@ -93,7 +115,8 @@ def set_block(root, pos: list[int], name: str, properties: dict[str, str] | None
 def set_blocks(root, changes: list[dict]) -> None:
     """Apply many block additions/removals in one pass; the last change per cell wins."""
     size = check(root)
-    palette = {_key(entry): i for i, entry in enumerate(root["palette"])}
+    palettes = _palettes(root)
+    palette = {_key(entry): i for i, entry in enumerate(palettes[0])}
     blocks = {tuple(map(int, entry["pos"])): entry for entry in root["blocks"]}
     for change in changes:
         pos = change["pos"]
@@ -106,8 +129,9 @@ def set_blocks(root, changes: list[dict]) -> None:
         entry_state = state(change["name"], change.get("properties"))
         palette_key = _key(entry_state)
         if palette_key not in palette:
-            palette[palette_key] = len(root["palette"])
-            root["palette"].append(entry_state)
+            palette[palette_key] = len(palettes[0])
+            for variant in palettes:
+                variant.append(deepcopy(entry_state))
         block = Compound({"pos": _vec(pos), "state": Int(palette[palette_key])})
         if change.get("nbt") is not None:
             block["nbt"] = _parse_nbt(change["nbt"])
@@ -132,13 +156,18 @@ def add_entity(root, pos: list[float], nbt: str, block_pos: list[int] | None = N
                                       "blockPos": _vec(block_pos), "nbt": payload}))
 
 
-def inspect(root, offset: int = 0, limit: int = 100, entity_offset: int = 0) -> dict:
+def inspect(root, offset: int = 0, limit: int = 100, entity_offset: int = 0,
+            palette_index: int = 0) -> dict:
     size = check(root)
     if offset < 0 or entity_offset < 0 or limit < 1 or limit > 1000:
         raise ValueError("offsets >= 0 and 1 <= limit <= 1000 required")
-    palette = root["palette"]
+    palettes = _palettes(root)
+    if not 0 <= palette_index < len(palettes):
+        raise ValueError("palette_index outside available variants")
+    palette = palettes[palette_index]
     entries = root["blocks"][offset:offset + limit]
     return {"size": size, "data_version": int(root.get("DataVersion", 0)),
+            "palette_count": len(palettes), "palette_index": palette_index,
             "block_count": len(root["blocks"]), "entity_count": len(root["entities"]),
             "palette": [{"name": str(p["Name"]), "properties": {k: str(v) for k, v in
                          p.get("Properties", {}).items()}} for p in palette],
@@ -150,9 +179,12 @@ def inspect(root, offset: int = 0, limit: int = 100, entity_offset: int = 0) -> 
 
 
 def preview(root, y: int, offset_x: int = 0, offset_z: int = 0,
-            width: int = 48, depth: int = 48) -> dict:
+            width: int = 48, depth: int = 48, palette_index: int = 0) -> dict:
     """Top-down slice with a compact symbol legend; air and absent cells are blank."""
     sx, sy, sz = check(root)
+    palettes = _palettes(root)
+    if not 0 <= palette_index < len(palettes):
+        raise ValueError("palette_index outside available variants")
     if not 0 <= y < sy or width < 1 or depth < 1 or width > 96 or depth > 96:
         raise ValueError("Invalid layer or viewport (max 96x96)")
     glyphs = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!@#$%^&*"
@@ -163,7 +195,7 @@ def preview(root, y: int, offset_x: int = 0, offset_z: int = 0,
         x, by, z = map(int, block["pos"])
         if by != y or not offset_x <= x < offset_x + width or not offset_z <= z < offset_z + depth:
             continue
-        name = str(root["palette"][int(block["state"])]["Name"])
+        name = str(palettes[palette_index][int(block["state"])]["Name"])
         if name in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
             continue
         if name not in index:
@@ -171,15 +203,16 @@ def preview(root, y: int, offset_x: int = 0, offset_z: int = 0,
             index[name] = symbol
             legend[symbol] = name
         grid[z - offset_z][x - offset_x] = index[name]
-    return {"layer_y": y, "origin_xz": [offset_x, offset_z],
+    return {"layer_y": y, "palette_index": palette_index, "palette_count": len(palettes),
+            "origin_xz": [offset_x, offset_z],
             "rows_north_to_south": ["".join(row) for row in grid], "legend": legend,
             "axes": "columns increase east (+X); rows increase south (+Z)"}
 
 
 def render_svg(root, y: int, offset_x: int = 0, offset_z: int = 0,
-               width: int = 48, depth: int = 48) -> str:
+               width: int = 48, depth: int = 48, palette_index: int = 0) -> str:
     """Standalone SVG layer preview for browsers and image viewers."""
-    view = preview(root, y, offset_x, offset_z, width, depth)
+    view = preview(root, y, offset_x, offset_z, width, depth, palette_index)
     colors = {symbol: "#" + hashlib.sha256(name.encode()).hexdigest()[:6]
               for symbol, name in view["legend"].items()}
     cell = 20
@@ -190,7 +223,7 @@ def render_svg(root, y: int, offset_x: int = 0, offset_z: int = 0,
         for x, symbol in enumerate(row):
             if symbol in colors:
                 parts.append(f'<rect x="{x*cell}" y="{z*cell}" width="19" height="19" fill="{colors[symbol]}"/>')
-    parts.append(f'<text x="5" y="{depth*cell+21}" fill="white" font-size="14">Y={y}, X={offset_x}.., Z={offset_z}..</text>')
+    parts.append(f'<text x="5" y="{depth*cell+21}" fill="white" font-size="14">Y={y}, variant={palette_index}, X={offset_x}.., Z={offset_z}..</text>')
     for i, (symbol, name) in enumerate(view["legend"].items()):
         yy = depth * cell + 42 + 20*i
         parts.append(f'<rect x="5" y="{yy-12}" width="13" height="13" fill="{colors[symbol]}"/>')
@@ -205,9 +238,10 @@ def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
     if offset < 0 or limit < 1 or limit > 5000:
         raise ValueError("offset >= 0 and 1 <= limit <= 5000 required")
     def mapping(root):
+        palette = _palettes(root)[0]
         return {tuple(map(int, b["pos"])): {
-            "name": _key(root["palette"][int(b["state"])])[0],
-            "properties": dict(_key(root["palette"][int(b["state"])])[1]),
+            "name": _key(palette[int(b["state"])])[0],
+            "properties": dict(_key(palette[int(b["state"])])[1]),
             **({"nbt": b["nbt"].snbt()} if "nbt" in b else {})} for b in root["blocks"]}
     a, b = mapping(before), mapping(after)
     changes = [{"pos": list(pos), "before": a.get(pos), "after": b.get(pos)}
@@ -216,10 +250,14 @@ def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
     entities_after = ([{"pos": list(map(float, e["pos"])),
                         "block_pos": list(map(int, e["blockPos"])), "nbt": e["nbt"].snbt()}
                        for e in after.get("entities", [])] if entities_changed else None)
+    variants_changed = (len(_palettes(before)) != len(_palettes(after)) or
+                        [p.snbt() for p in _palettes(before)[1:]] !=
+                        [p.snbt() for p in _palettes(after)[1:]])
     return {"before_size": list(map(int, before["size"])),
             "after_size": list(map(int, after["size"])), "change_count": len(changes),
             "changes": changes[offset:offset + limit],
-            "entities_changed": entities_changed, "entities_after": entities_after}
+            "entities_changed": entities_changed, "entities_after": entities_after,
+            "alternate_palettes_changed": variants_changed}
 
 
 def patch(root, changes: list[dict]) -> None:
@@ -309,8 +347,8 @@ def transform(root, quarter_turns: int = 0, flip_x: bool = False,
             dx, dz = dz, dx
         return (x, y, z)
     result["size"] = _vec([sz, sy, sx] if quarter_turns % 2 else [sx, sy, sz])
-    result["palette"] = List[Compound]([_transform_state(p, quarter_turns, flip_x, flip_y, flip_z)
-                                       for p in root["palette"]])
+    for original, target in zip(_palettes(root), _palettes(result)):
+        target[:] = [_transform_state(p, quarter_turns, flip_x, flip_y, flip_z) for p in original]
     for block in result["blocks"]:
         block["pos"] = _vec(point(list(map(int, block["pos"]))))
         # Structure NBT usually omits BE world coordinates; adjust if they are present.
@@ -331,8 +369,8 @@ def transform(root, quarter_turns: int = 0, flip_x: bool = False,
                 if flip_y: nbt["Rotation"][1] = type(nbt["Rotation"][1])(-float(nbt["Rotation"][1]))
             if all(k in nbt for k in ("TileX", "TileY", "TileZ")):
                 nbt["TileX"], nbt["TileY"], nbt["TileZ"] = map(Int, point([int(nbt[k]) for k in ("TileX", "TileY", "TileZ")]))
-            if "Facing" in nbt and int(nbt["Facing"]) in (2, 3, 4, 5):
-                dirs = {2: "north", 3: "south", 4: "west", 5: "east"}
+            if "Facing" in nbt and int(nbt["Facing"]) in (0, 1, 2, 3):
+                dirs = {0: "south", 1: "west", 2: "north", 3: "east"}
                 inverse = {v: k for k, v in dirs.items()}
                 nbt["Facing"] = type(nbt["Facing"])(inverse[_direction(dirs[int(nbt["Facing"])], quarter_turns, flip_x, flip_z)])
     check(result)

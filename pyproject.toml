@@ -4,10 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minecraft-structure-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Minecraft Java structure NBT editing tools over MCP"
 requires-python = ">=3.10"
-dependencies = ["mcp>=1.9,<2", "nbtlib>=2,<3"]
+dependencies = ["mcp>=1.30,<2", "nbtlib>=2,<3"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
 
 [project.scripts]
 minecraft-structure-mcp = "minecraft_structure_mcp.server:main"
@@ -16,5 +19,4 @@ minecraft-structure-mcp = "minecraft_structure_mcp.server:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-minecraft_structure_mcp = ["data/*.json"]
-
+minecraft_structure_mcp = ["data/*.json", "data/*.html"]

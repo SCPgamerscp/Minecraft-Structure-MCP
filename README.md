@@ -25,6 +25,14 @@ MCP クライアントの stdio 設定例（`/absolute/path/...` を実際のパ
 }
 ```
 
+Windows PowerShell で直接起動する場合:
+
+```powershell
+py -m pip install -e .
+$env:STRUCTURE_WORKSPACE = "C:\minecraft-structures"
+py -m minecraft_structure_mcp.server
+```
+
 ローカル HTTP:
 
 ```bash
@@ -32,15 +40,17 @@ minecraft-structure-mcp --transport streamable-http --host 127.0.0.1 --port 8000
 # MCP URL: http://127.0.0.1:8000/mcp
 ```
 
-HTTPS で接続する場合は証明書と鍵を指定できます。外部の AI クライアントを接続させるときは、認証を行うリバースプロキシを前に置き、認証済みの接続だけを MCP に通してください。MCP 本体には認証機能を設定していないため、公開アドレスへ直接バインドしないでください。MCP ツールは許可したディレクトリのファイルを編集できます。
+HTTPS 公開時は TLS 証明書と32文字以上の共有トークンが必須です。クライアントの HTTP ヘッダーに `Authorization: Bearer <トークン>` を設定します。認証なしの HTTP はループバックアドレスにしかバインドできません。MCP ツールは許可したディレクトリのファイルを編集できます。共有トークンを安全に管理できないクライアントを使う場合は、ループバックで起動して認証付きリバースプロキシを利用してください。
 
 ```bash
-minecraft-structure-mcp --transport streamable-http --host 127.0.0.1 --port 8443 \
+export STRUCTURE_MCP_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+minecraft-structure-mcp --transport streamable-http --host 0.0.0.0 --port 8443 \
+  --public-url https://your-host.example:8443/mcp \
   --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem
-# MCP URL: https://your-host.example:8443/mcp
+# MCP URL: https://your-host.example:8443/mcp（Bearer ヘッダー付き）
 ```
 
-`STRUCTURE_WORKSPACE` 未指定時は起動時の作業ディレクトリです。NBT と SVG の読み書きはこのディレクトリ内に限定されます。シンボリックリンクによるディレクトリ外へのアクセスも拒否します。
+`STRUCTURE_WORKSPACE` 未指定時は起動時の作業ディレクトリです。NBT、SVG、HTML の読み書きはこのディレクトリ内に限定されます。シンボリックリンクによるディレクトリ外へのアクセスも拒否します。
 
 ## ツールと Resource
 
@@ -49,15 +59,18 @@ minecraft-structure-mcp --transport streamable-http --host 127.0.0.1 --port 8443
 | `find_blocks` | 1.20.1 のブロックIDと許可された Block States を検索 |
 | `analyze_structure` | `.nbt` のサイズ、パレット、ブロック、ブロックエンティティ、エンティティを取得（ページ指定可） |
 | `create_structure` | 新規 `.nbt` を作成（ブロック・エンティティを一括指定可） |
+| `import_structure` / `export_structure` | HTTPS クライアントから NBT をアップロード／分割した base64 でダウンロード |
 | `edit_structure` | 既存 `.nbt` に差分適用、サイズ変更、エンティティ追加・置換 |
 | `diff_structures` | 座標ごとのブロック差分とエンティティ差分を生成 |
 | `convert_structure` | X/Y/Z 反転後に Y 軸回り 90° 単位で回転 |
 | `preview_structure` | AI と人間が読める、凡例付きの水平断面表示 |
 | `render_preview` | 凡例付きの SVG 断面画像を保存 |
+| `render_3d_preview` | 回転・拡大・高さ切替が可能な単体 HTML 3D プレビューを保存 |
+| `split_structure` | 48以下の構造物NBTに分割し、相対配置オフセットを返す |
 
 MCP Resource `minecraft://blocks/1.20.1/schema` に全ブロックの定義、`minecraft://blocks/1.20.1/oak_stairs` に個別の Block States 定義があります。全件 Resource が大きい場合は `find_blocks` か個別 Resource を使ってください。収録されているのは Java 版バニラの 1,003 ブロックです。Mod で追加したブロックの新規生成は検証対象外ですが、既存NBT内のパレットは読み込んで保持できます。
 
-`palette` と、難破船などに使われる複数候補の `palettes` の両形式に対応します。解析とプレビューでは `palette_index` で候補を選べます。複数パレット構造の編集では既存候補を維持し、新しいブロック状態を全候補へ追加します。差分の `alternate_palettes_changed` は代替候補自体の変更を通知しますが、`edit_structure` の `changes` はブロック座標の差分のみを適用します。
+`palette` と、難破船などに使われる複数候補の `palettes` の両形式に対応します。解析とプレビューでは `palette_index` で候補を選べます。複数パレット構造の編集では既存候補を維持し、新しいブロック状態を全候補へ追加します。代替候補を個別に編集するときはブロックに `variants: [{"name": "minecraft:...", "properties": {}}, ...]` を候補数だけ指定します。
 
 ### 入力例
 
@@ -78,7 +91,7 @@ MCP Resource `minecraft://blocks/1.20.1/schema` に全ブロックの定義、`m
 }
 ```
 
-`diff_structures` の `changes` は `edit_structure` の `changes` に渡せます。`change_count` が `limit` より多いときは `offset` を進めて続きを取得します。エンティティが変わったときは `entities_after` を `replace_entities` に、サイズが変わったときは `after_size` を `size` に渡してください。差分の各ブロックは `{"pos": [x,y,z], "after": {"name": "minecraft:stone"}}`、削除は `{"pos": [x,y,z], "after": null}` です。
+`diff_structures` の `changes` は `edit_structure` の `changes` に渡せます。`change_count` が `limit` より多いときは `offset` を進めて続きを取得します。エンティティが変わったときは `entities_after` を `replace_entities` に、サイズが変わったときは `after_size` を `size` に渡してください。パレット候補数が変わったときは `after_palette_count` を `palette_count` に渡します。各ブロック差分は `{"pos": [x,y,z], "after": {"name": "minecraft:stone"}}`、削除は `{"pos": [x,y,z], "after": null}` です。候補ごとの違いも `after.variants` に入り、座標単位で適用できます。使用されていないパレット項目だけの変更は `alternate_palettes_changed` で通知します。
 
 ### 座標と方向
 
@@ -87,9 +100,11 @@ MCP Resource `minecraft://blocks/1.20.1/schema` に全ブロックの定義、`m
 - 階段の `facing`・`half`・左右の `shape`、ドアの `facing`・`half`・`hinge`、スラブの `type`、線路の `shape`、柵などの接続方向、看板の `rotation`、ブロックの `axis` を変換します。ブロックエンティティの SNBT は保持し、埋め込まれた `x/y/z` があれば相対座標として変換します。エンティティの位置、回転、絵画の `TileX/Y/Z` と `Facing` も変換します。
 - 特殊なブロック・エンティティの方向固有タグすべてを自動変換するわけではありません。変換後はプレビューとゲーム内で確認してください。
 
-48×48×48 のサイズ制限はサーバー側には設けていません。NBT の `size` は 32 ビット整数として保存されます。Minecraft ゲーム側の構造物ブロック UI／設置方法固有の上限や、巨大な一括設置時の負荷は別途考慮してください。プレビューは最大 96×96 の断面を `offset_x` / `offset_z` で分割して表示します。
+48×48×48 のサイズ制限はサーバー側には設けていません。NBT の `size` は 32 ビット整数として保存されます。構造物ブロックで扱う必要がある場合は `split_structure` が48以下の部品を作成します。返された `offset` の位置に各部品を置いてください。分割時はブロックエンティティや絵画の座標も部品の相対座標に変換します。プレビューは最大 96×96 の水平断面、3D は各軸最大96の範囲をオフセットで切り出します。3D はブロックを色分けした立方体として描画し、階段などの細かい形状やテクスチャは再現しません。
 
-現段階のプレビューは水平断面の SVG です。3D 表示と、Minecraft 1.20.1 のゲーム本体での実配置テストは含まれません。
+HTTPS クライアントから使う場合、`import_structure` は圧縮済みNBT（最大16 MiB）を受け取ります。`export_structure` は `offset` と `length` で分割取得できます。`render_preview(include_svg=true)`、`render_3d_preview(include_html=true)` は描画内容をMCPの返答にも含めるため、サーバーのファイルに直接アクセスできないクライアントでもプレビューを保存できます。
+
+Minecraft 1.20.1 のバニラ構造物（村と8候補パレットの難破船）を読み、NBTの往復保存と回転後の再読込を確認しています。ゲーム内での実配置は、利用するワールド／データパックで最終確認してください。
 
 ## 開発
 

@@ -32,10 +32,10 @@ minecraft-structure-mcp --transport streamable-http --host 127.0.0.1 --port 8000
 # MCP URL: http://127.0.0.1:8000/mcp
 ```
 
-HTTPS で直接公開する場合は証明書と鍵を指定します。外部の AI クライアントを接続させるときは、認証を行うリバースプロキシを前に置き、認証済みの接続だけを MCP に通してください。MCP ツールは許可したディレクトリのファイルを編集できます。
+HTTPS で接続する場合は証明書と鍵を指定できます。外部の AI クライアントを接続させるときは、認証を行うリバースプロキシを前に置き、認証済みの接続だけを MCP に通してください。MCP 本体には認証機能を設定していないため、公開アドレスへ直接バインドしないでください。MCP ツールは許可したディレクトリのファイルを編集できます。
 
 ```bash
-minecraft-structure-mcp --transport streamable-http --host 0.0.0.0 --port 8443 \
+minecraft-structure-mcp --transport streamable-http --host 127.0.0.1 --port 8443 \
   --tls-cert /path/to/fullchain.pem --tls-key /path/to/privkey.pem
 # MCP URL: https://your-host.example:8443/mcp
 ```

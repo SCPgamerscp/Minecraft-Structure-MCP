@@ -40,7 +40,7 @@ def test_transform_and_inverse_with_state_entity_and_rail():
     assert states[2]["properties"]["type"] == "bottom"
     assert states[3]["properties"]["shape"] == "north_east"
     assert list(map(float, rotated["entities"][0]["pos"])) == [4.5, 2.0, 3.5]
-    assert int(rotated["entities"][0]["nbt"]["Facing"]) == 5
+    assert int(rotated["entities"][0]["nbt"]["Facing"]) == 3
 
 
 def test_diff_patch_and_preview(tmp_path):
@@ -73,6 +73,57 @@ def test_edit_applies_entity_and_size_diff(tmp_path, monkeypatch):
     result = structure.load(tmp_path / "after.nbt")
     assert structure.diff(result, updated)["changes"] == []
     assert structure.diff(result, updated)["entities_changed"] is False
+
+
+def test_vanilla_alternate_palettes_are_preserved_and_transformed(tmp_path):
+    from copy import deepcopy
+    from nbtlib import Compound, List, String
+    root = structure.new([3, 1, 4])
+    structure.set_block(root, [0, 0, 0], "minecraft:oak_stairs", {"facing": "north"})
+    root["palettes"] = List[List[Compound]]([
+        List[Compound](root.pop("palette")),
+        List[Compound]([structure.state("minecraft:spruce_stairs", {"facing": "south"})]),
+    ])
+    file = tmp_path / "shipwreck.nbt"
+    structure.save(root, file)
+    loaded = structure.load(file)
+    variant_edit = deepcopy(loaded)
+    variant_edit["palettes"][1][0]["Name"] = String("minecraft:birch_stairs")
+    variant_delta = structure.diff(loaded, variant_edit)
+    assert variant_delta["change_count"] == 0
+    assert variant_delta["alternate_palettes_changed"] is True
+    assert structure.inspect(loaded)["palette_count"] == 2
+    assert structure.inspect(loaded, palette_index=1)["palette"][0]["name"] == "minecraft:spruce_stairs"
+    assert "minecraft:spruce_stairs" in structure.preview(loaded, 0, palette_index=1)["legend"].values()
+    structure.set_block(loaded, [1, 0, 0], "minecraft:stone")
+    assert len(loaded["palettes"][0]) == len(loaded["palettes"][1]) == 2
+    rotated = structure.transform(loaded, 1)
+    assert rotated["palettes"][0][0]["Properties"]["facing"] == "east"
+    assert rotated["palettes"][1][0]["Properties"]["facing"] == "west"
+    structure.save(rotated, file)
+    assert structure.load(file)["palettes"][1][1]["Name"] == "minecraft:stone"
+
+
+def test_failed_save_keeps_previous_file(tmp_path, monkeypatch):
+    root = structure.new([1, 1, 1])
+    path = tmp_path / "existing.nbt"
+    structure.save(root, path)
+    original = path.read_bytes()
+    def broken_save(*args, **kwargs):
+        raise OSError("disk failed")
+    monkeypatch.setattr(root, "save", broken_save)
+    with pytest.raises(OSError):
+        structure.save(root, path)
+    assert path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("facing,expected", [(0, 1), (1, 2), (2, 3), (3, 0)])
+def test_hanging_entity_horizontal_facing_turn(facing, expected):
+    root = structure.new([2, 2, 2])
+    structure.add_entity(root, [0.5, 0.5, 0.5],
+                         '{id:"minecraft:painting",Facing:' + str(facing) + 'b}')
+    assert int(structure.transform(root, 1)["entities"][0]["nbt"]["Facing"]) == expected
 
 
 def test_validation_and_path_security():

@@ -50,9 +50,10 @@ def find_blocks(query: str = "", limit: int = 30) -> dict:
 
 
 @mcp.tool()
-def analyze_structure(path: str, offset: int = 0, limit: int = 100, entity_offset: int = 0) -> dict:
+def analyze_structure(path: str, offset: int = 0, limit: int = 100,
+                      entity_offset: int = 0, palette_index: int = 0) -> dict:
     """Read vanilla compressed .nbt, palette, blocks, block-entity SNBT and entity SNBT."""
-    return structure.inspect(structure.load(_path(path)), offset, limit, entity_offset)
+    return structure.inspect(structure.load(_path(path)), offset, limit, entity_offset, palette_index)
 
 
 @mcp.tool()
@@ -112,17 +113,19 @@ def convert_structure(source: str, output: str, quarter_turns: int = 0,
 
 @mcp.tool()
 def preview_structure(path: str, y: int, offset_x: int = 0, offset_z: int = 0,
-                      width: int = 48, depth: int = 48) -> dict:
+                      width: int = 48, depth: int = 48, palette_index: int = 0) -> dict:
     """Human and AI-readable 2D horizontal slice of a structure with a block-ID legend; page over larger structures."""
-    return structure.preview(structure.load(_path(path)), y, offset_x, offset_z, width, depth)
+    return structure.preview(structure.load(_path(path)), y, offset_x, offset_z, width, depth, palette_index)
 
 
 @mcp.tool()
 def render_preview(path: str, output: str, y: int, offset_x: int = 0,
-                   offset_z: int = 0, width: int = 48, depth: int = 48) -> dict:
+                   offset_z: int = 0, width: int = 48, depth: int = 48,
+                   palette_index: int = 0) -> dict:
     """Save a colored, self-contained SVG layer preview with legend for human review."""
     result = _svg_path(output)
-    drawing = structure.render_svg(structure.load(_path(path)), y, offset_x, offset_z, width, depth)
+    drawing = structure.render_svg(structure.load(_path(path)), y, offset_x, offset_z,
+                                   width, depth, palette_index)
     result.parent.mkdir(parents=True, exist_ok=True)
     result.write_text(drawing, encoding="utf-8")
     return {"path": output, "mime_type": "image/svg+xml"}

@@ -22,6 +22,7 @@ def test_round_trip_entities_blocks_and_large_size(tmp_path):
 
 
 def test_transform_and_inverse_with_state_entity_and_rail():
+    """Check rotation and mirrors for blocks, rails, and a hanging entity."""
     original = structure.new([5, 3, 7])
     structure.set_block(original, [1, 0, 2], "minecraft:oak_stairs",
                         {"facing": "north", "half": "bottom", "shape": "inner_left"})
@@ -76,6 +77,7 @@ def test_edit_applies_entity_and_size_diff(tmp_path, monkeypatch):
 
 
 def test_vanilla_alternate_palettes_are_preserved_and_transformed(tmp_path):
+    """Keep alternate palettes intact through load, edit, transform, and save."""
     from copy import deepcopy
     from nbtlib import Compound, List, String
     root = structure.new([3, 1, 4])
@@ -105,11 +107,13 @@ def test_vanilla_alternate_palettes_are_preserved_and_transformed(tmp_path):
 
 
 def test_failed_save_keeps_previous_file(tmp_path, monkeypatch):
+    """Preserve the existing NBT when writing the replacement fails."""
     root = structure.new([1, 1, 1])
     path = tmp_path / "existing.nbt"
     structure.save(root, path)
     original = path.read_bytes()
     def broken_save(*args, **kwargs):
+        """Simulate a failed NBT serialization."""
         raise OSError("disk failed")
     monkeypatch.setattr(root, "save", broken_save)
     with pytest.raises(OSError):
@@ -120,6 +124,7 @@ def test_failed_save_keeps_previous_file(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("facing,expected", [(0, 1), (1, 2), (2, 3), (3, 0)])
 def test_hanging_entity_horizontal_facing_turn(facing, expected):
+    """Rotate each supported horizontal painting direction clockwise."""
     root = structure.new([2, 2, 2])
     structure.add_entity(root, [0.5, 0.5, 0.5],
                          '{id:"minecraft:painting",Facing:' + str(facing) + 'b}')

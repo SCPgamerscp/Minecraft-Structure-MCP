@@ -15,12 +15,14 @@ from .schema import validate
 
 
 def _vec(values, tag=Int):
+    """Convert three coordinates to a typed NBT list."""
     if len(values) != 3:
         raise ValueError("Expected three coordinates")
     return List[tag]([tag(v) for v in values])
 
 
 def _size(size):
+    """Validate three positive dimensions that fit in NBT Int tags."""
     if len(size) != 3 or any(type(x) is not int or x <= 0 for x in size):
         raise ValueError("size must contain three positive integers")
     if any(x > 2**31 - 1 for x in size):
@@ -29,6 +31,7 @@ def _size(size):
 
 
 def new(size: list[int], data_version: int = 3465) -> nbtlib.File:
+    """Create an empty vanilla structure with a single palette."""
     size = _size(size)
     root = Compound({"DataVersion": Int(data_version), "size": _vec(size),
                      "palette": List[Compound](), "blocks": List[Compound](),
@@ -48,6 +51,7 @@ def _palettes(root) -> list:
 
 
 def check(root) -> tuple[int, int, int]:
+    """Validate structure dimensions, palettes, and block positions and indices."""
     if not isinstance(root, Compound):
         raise ValueError("Root must be an NBT compound")
     size = _size([int(x) for x in root["size"]])
@@ -64,12 +68,14 @@ def check(root) -> tuple[int, int, int]:
 
 
 def load(path: str | Path) -> nbtlib.File:
+    """Load a compressed structure NBT file and validate its contents."""
     result = nbtlib.load(str(path))
     check(result)
     return result
 
 
 def save(root: nbtlib.File, path: str | Path) -> None:
+    """Save a valid structure through a temporary file before replacing the target."""
     check(root)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -85,6 +91,7 @@ def save(root: nbtlib.File, path: str | Path) -> None:
 
 
 def state(name: str, properties: dict[str, str] | None = None) -> Compound:
+    """Build a validated palette entry for a block and its state properties."""
     properties = {str(k): str(v) for k, v in (properties or {}).items()}
     validate(name, properties)
     value = Compound({"Name": String(name)})
@@ -94,11 +101,13 @@ def state(name: str, properties: dict[str, str] | None = None) -> Compound:
 
 
 def _key(block_state: Compound) -> tuple:
+    """Return a stable name and property tuple for a palette entry."""
     return (str(block_state["Name"]), tuple(sorted((str(k), str(v)) for k, v in
            block_state.get("Properties", {}).items())))
 
 
 def _parse_nbt(snbt: str | None) -> Compound | None:
+    """Parse optional SNBT, requiring a compound when a value is present."""
     if snbt is None:
         return None
     result = nbtlib.parse_nbt(snbt)
@@ -109,6 +118,7 @@ def _parse_nbt(snbt: str | None) -> Compound | None:
 
 def set_block(root, pos: list[int], name: str, properties: dict[str, str] | None = None,
               nbt: str | None = None) -> None:
+    """Add or replace one block, including optional block entity NBT."""
     set_blocks(root, [{"pos": pos, "name": name, "properties": properties, "nbt": nbt}])
 
 
@@ -140,10 +150,12 @@ def set_blocks(root, changes: list[dict]) -> None:
 
 
 def remove_block(root, pos: list[int]) -> None:
+    """Remove the block at a structure-relative position, if present."""
     set_blocks(root, [{"pos": pos, "name": None}])
 
 
 def add_entity(root, pos: list[float], nbt: str, block_pos: list[int] | None = None) -> None:
+    """Append an entity with SNBT and an optional anchor block position."""
     check(root)
     if len(pos) != 3:
         raise ValueError("Entity position needs three coordinates")
@@ -158,6 +170,7 @@ def add_entity(root, pos: list[float], nbt: str, block_pos: list[int] | None = N
 
 def inspect(root, offset: int = 0, limit: int = 100, entity_offset: int = 0,
             palette_index: int = 0) -> dict:
+    """Return paginated blocks and entities using the selected palette variant."""
     size = check(root)
     if offset < 0 or entity_offset < 0 or limit < 1 or limit > 1000:
         raise ValueError("offsets >= 0 and 1 <= limit <= 1000 required")
@@ -233,11 +246,13 @@ def render_svg(root, y: int, offset_x: int = 0, offset_z: int = 0,
 
 
 def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
+    """Report primary-palette block changes and entity or variant differences."""
     check(before)
     check(after)
     if offset < 0 or limit < 1 or limit > 5000:
         raise ValueError("offset >= 0 and 1 <= limit <= 5000 required")
     def mapping(root):
+        """Map block positions to states from the primary palette."""
         palette = _palettes(root)[0]
         return {tuple(map(int, b["pos"])): {
             "name": _key(palette[int(b["state"])])[0],
@@ -261,6 +276,7 @@ def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
 
 
 def patch(root, changes: list[dict]) -> None:
+    """Apply the block changes from a structure diff in place."""
     set_blocks(root, [{"pos": item["pos"], **(item.get("after") or {"name": None})}
                       for item in changes])
 
@@ -269,6 +285,7 @@ _DIR = {"north": (0, -1), "east": (1, 0), "south": (0, 1), "west": (-1, 0)}
 
 
 def _direction(value: str, quarter_turns: int, flip_x: bool, flip_z: bool) -> str:
+    """Mirror and rotate a horizontal direction, preserving unknown values."""
     if value not in _DIR:
         return value
     x, z = _DIR[value]
@@ -279,6 +296,7 @@ def _direction(value: str, quarter_turns: int, flip_x: bool, flip_z: bool) -> st
 
 
 def _transform_state(block_state, turns, fx, fy, fz):
+    """Transform directional block properties without changing the input state."""
     result = deepcopy(block_state)
     p = result.get("Properties")
     if p is None: return result
@@ -337,6 +355,7 @@ def transform(root, quarter_turns: int = 0, flip_x: bool = False,
         raise ValueError("quarter_turns must be 0, 1, 2 or 3")
     result = deepcopy(root)
     def point(values, continuous=False):
+        """Transform coordinates, using boundary coordinates for entity positions."""
         x, y, z = values
         x = sx - x if flip_x and continuous else sx - 1 - x if flip_x else x
         y = sy - y if flip_y and continuous else sy - 1 - y if flip_y else y

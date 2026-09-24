@@ -16,6 +16,7 @@ mcp = FastMCP("Minecraft Java Structure NBT", host="127.0.0.1", port=8000,
 
 
 def _path(path: str) -> Path:
+    """Resolve an NBT path inside the configured structure workspace."""
     target = (ROOT / path).resolve()
     if not target.is_relative_to(ROOT) or target.suffix.lower() != ".nbt":
         raise ValueError("Path must be a .nbt file within STRUCTURE_WORKSPACE")
@@ -23,6 +24,7 @@ def _path(path: str) -> Path:
 
 
 def _svg_path(path: str) -> Path:
+    """Resolve an SVG output path inside the configured structure workspace."""
     target = (ROOT / path).resolve()
     if not target.is_relative_to(ROOT) or target.suffix.lower() != ".svg":
         raise ValueError("Output must be an .svg file within STRUCTURE_WORKSPACE")
@@ -132,6 +134,7 @@ def render_preview(path: str, output: str, y: int, offset_x: int = 0,
 
 
 def main() -> None:
+    """Parse transport options and start the MCP server."""
     parser = argparse.ArgumentParser(description="Minecraft Java structure NBT MCP server")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")

@@ -30,7 +30,7 @@ def test_transform_and_inverse_with_state_entity_and_rail():
     structure.set_block(original, [3, 2, 2], "minecraft:stone_slab", {"type": "top"})
     structure.set_block(original, [2, 1, 3], "minecraft:rail", {"shape": "north_east"})
     structure.add_entity(original, [1.5, 1.0, 2.5],
-                         '{id:"minecraft:painting",Rotation:[180.0f,0.0f],TileX:1,TileY:1,TileZ:2,Facing:2b}')
+                         '{id:"minecraft:painting",Pos:[1.5d,1.0d,2.5d],Rotation:[180.0f,0.0f],TileX:1,TileY:1,TileZ:2,Facing:2b}')
     rotated = structure.transform(original, 1, flip_x=True, flip_y=True)
     assert list(map(int, rotated["size"])) == [7, 3, 5]
     assert list(map(int, rotated["blocks"][0]["pos"])) == [4, 2, 3]
@@ -40,6 +40,7 @@ def test_transform_and_inverse_with_state_entity_and_rail():
     assert states[2]["properties"]["type"] == "bottom"
     assert states[3]["properties"]["shape"] == "north_east"
     assert list(map(float, rotated["entities"][0]["pos"])) == [4.5, 2.0, 3.5]
+    assert list(map(float, rotated["entities"][0]["nbt"]["Pos"])) == [4.5, 2.0, 3.5]
     assert int(rotated["entities"][0]["nbt"]["Facing"]) == 3
 
 
@@ -90,7 +91,7 @@ def test_vanilla_alternate_palettes_are_preserved_and_transformed(tmp_path):
     variant_edit = deepcopy(loaded)
     variant_edit["palettes"][1][0]["Name"] = String("minecraft:birch_stairs")
     variant_delta = structure.diff(loaded, variant_edit)
-    assert variant_delta["change_count"] == 0
+    assert variant_delta["change_count"] == 1
     assert variant_delta["alternate_palettes_changed"] is True
     assert structure.inspect(loaded)["palette_count"] == 2
     assert structure.inspect(loaded, palette_index=1)["palette"][0]["name"] == "minecraft:spruce_stairs"
@@ -102,6 +103,93 @@ def test_vanilla_alternate_palettes_are_preserved_and_transformed(tmp_path):
     assert rotated["palettes"][1][0]["Properties"]["facing"] == "west"
     structure.save(rotated, file)
     assert structure.load(file)["palettes"][1][1]["Name"] == "minecraft:stone"
+
+
+def test_alternate_palette_diff_is_applicable_and_can_split_shared_states(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from nbtlib import Compound, List
+    import minecraft_structure_mcp.server as server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    before = structure.new([3, 1, 1])
+    structure.set_blocks(before, [
+        {"pos": [0, 0, 0], "name": "minecraft:oak_stairs"},
+        {"pos": [1, 0, 0], "name": "minecraft:oak_stairs"},
+    ])
+    after = deepcopy(before)
+    structure.set_palette_count(after, 2)
+    # Two cells initially share one palette index; change the alternate only for one.
+    structure.set_blocks(after, [{"pos": [1, 0, 0], "name": "minecraft:oak_stairs",
+                                  "variants": [{"name": "minecraft:oak_stairs"},
+                                               {"name": "minecraft:spruce_stairs"}]}])
+    delta = structure.diff(before, after)
+    assert delta["change_count"] == 2  # both cells gain an alternate palette
+    assert delta["after_palette_count"] == 2
+    assert delta["changes"][1]["after"]["variants"][1]["name"] == "minecraft:spruce_stairs"
+    structure.save(before, tmp_path / "before.nbt")
+    server.edit_structure("before.nbt", "after.nbt", delta["changes"],
+                          palette_count=delta["after_palette_count"])
+    result = structure.load(tmp_path / "after.nbt")
+    assert structure.diff(result, after)["change_count"] == 0
+    assert structure.inspect(result, palette_index=1)["palette_count"] == 2
+
+
+def test_interactive_3d_preview_escapes_untrusted_names_and_bounds():
+    root = structure.new([65, 2, 65])
+    structure.set_block(root, [60, 1, 60], "minecraft:stone")
+    structure.add_entity(root, [60.5, 1, 60.5], '{id:"minecraft:armor_stand"}')
+    page = structure.render_3d_html(root, 50, 0, 50, 16, 2, 16)
+    assert "<canvas" in page and '"blocks":[[10,1,10,0]]' in page
+    assert '"entities":[[10.5,1.0,10.5,"minecraft:armor_stand"]]' in page
+    root["palette"][0]["Name"] = type(root["palette"][0]["Name"])("</script><script>evil()</script>")
+    page = structure.render_3d_html(root)
+    assert "</script><script>evil()" not in page
+    assert "\\u003c/script>" in page
+    with pytest.raises(ValueError, match="Viewport"):
+        structure.render_3d_html(root, width=97)
+
+
+def test_split_large_structure_keeps_entities_and_block_entity_payload(tmp_path, monkeypatch):
+    from minecraft_structure_mcp import server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    root = structure.new([100, 3, 52])
+    structure.set_block(root, [50, 1, 49], "minecraft:chest", nbt='{id:"minecraft:chest",x:50,y:1,z:49}')
+    structure.set_block(root, [99, 2, 0], "minecraft:stone")
+    structure.add_entity(root, [50.5, 1.0, 49.5],
+                         '{id:"minecraft:painting",TileX:50,TileY:1,TileZ:49,Facing:2b}')
+    structure.save(root, tmp_path / "large.nbt")
+    result = server.split_structure("large.nbt", "pieces")
+    assert result["part_count"] == 2
+    assert all(max(part["size"]) <= 48 for part in result["parts"])
+    chunks = [(part["offset"], structure.load(tmp_path / part["path"])) for part in result["parts"]]
+    middle = next(chunk for origin, chunk in chunks if origin == [48, 0, 48])
+    assert list(map(int, middle["blocks"][0]["pos"])) == [2, 1, 1]
+    assert int(middle["blocks"][0]["nbt"]["x"]) == 2
+    assert float(middle["entities"][0]["pos"][0]) == 2.5
+    assert int(middle["entities"][0]["nbt"]["TileZ"]) == 1
+
+
+def test_remote_import_export_and_preview_contents(tmp_path, monkeypatch):
+    import base64
+    from minecraft_structure_mcp import server
+    monkeypatch.setattr(server, "ROOT", tmp_path)
+    root = structure.new([65, 2, 1])
+    structure.set_block(root, [64, 1, 0], "minecraft:stone")
+    original = tmp_path / "original.nbt"
+    structure.save(root, original)
+    binary = original.read_bytes()
+    assert server.import_structure("uploaded.nbt", base64.b64encode(binary).decode())["blocks"] == 1
+    first = server.export_structure("uploaded.nbt", length=10)
+    second = server.export_structure("uploaded.nbt", offset=first["next_offset"])
+    assert base64.b64decode(first["content_base64"]) + base64.b64decode(second["content_base64"]) == binary
+    html = server.render_3d_preview("uploaded.nbt", "preview.html", offset_x=60,
+                                    width=5, height=2, depth=1, include_html=True)["html"]
+    assert "<canvas" in html and (tmp_path / "preview.html").exists()
+    svg = server.render_preview("uploaded.nbt", "preview.svg", 1, offset_x=60,
+                                width=5, depth=1, include_svg=True)["svg"]
+    assert "<svg" in svg
+    with pytest.raises(Exception):
+        server.import_structure("uploaded.nbt", base64.b64encode(b"bad NBT").decode())
+    assert (tmp_path / "uploaded.nbt").read_bytes() == binary
 
 
 def test_failed_save_keeps_previous_file(tmp_path, monkeypatch):
@@ -140,3 +228,15 @@ def test_validation_and_path_security():
         structure.new([2**31, 1, 1])
     with pytest.raises(ValueError):
         _path("../outside.nbt")
+
+
+def test_rotation_and_mirrors_keep_all_vanilla_state_values_valid():
+    for name, spec in schema.blocks().items():
+        original = structure.state(name, {key: values[0] for key, values in spec.items()})
+        for turns, flip_x, flip_y, flip_z in (
+            (1, False, False, False), (0, True, False, False),
+            (0, False, True, False), (1, True, True, True),
+        ):
+            updated = structure._transform_state(original, turns, flip_x, flip_y, flip_z)
+            schema.validate(str(updated["Name"]),
+                            {key: str(value) for key, value in updated.get("Properties", {}).items()})

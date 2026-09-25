@@ -5,13 +5,15 @@ from copy import deepcopy
 from pathlib import Path
 from html import escape
 import hashlib
+from importlib.resources import files
+import json
 import os
 import tempfile
 
 import nbtlib
-from nbtlib import Byte, Compound, Double, Int, List, String
+from nbtlib import Compound, Double, Int, List, String
 
-from .schema import validate
+from .schema import blocks as block_schema, validate
 
 
 def _vec(values, tag=Int):
@@ -45,6 +47,23 @@ def _palettes(root) -> list:
     if "palettes" in root and root["palettes"]:
         return list(root["palettes"])
     raise ValueError("Expected vanilla structure palette or nonempty palettes")
+
+
+def set_palette_count(root, count: int) -> None:
+    """Change variant count while retaining each existing block's palette index."""
+    check(root)
+    if type(count) is not int or count < 1 or count > 64:
+        raise ValueError("palette_count must be between 1 and 64")
+    current = _palettes(root)
+    if count == 1:
+        root["palette"] = List[Compound](deepcopy(current[0]))
+        root.pop("palettes", None)
+    else:
+        root["palettes"] = List[List[Compound]]([
+            List[Compound](deepcopy(current[min(i, len(current) - 1)]))
+            for i in range(count)
+        ])
+        root.pop("palette", None)
 
 
 def check(root) -> tuple[int, int, int]:
@@ -98,6 +117,11 @@ def _key(block_state: Compound) -> tuple:
            block_state.get("Properties", {}).items())))
 
 
+def _state_json(block_state: Compound) -> dict:
+    name, properties = _key(block_state)
+    return {"name": name, "properties": dict(properties)}
+
+
 def _parse_nbt(snbt: str | None) -> Compound | None:
     if snbt is None:
         return None
@@ -116,7 +140,8 @@ def set_blocks(root, changes: list[dict]) -> None:
     """Apply many block additions/removals in one pass; the last change per cell wins."""
     size = check(root)
     palettes = _palettes(root)
-    palette = {_key(entry): i for i, entry in enumerate(palettes[0])}
+    palette = {tuple(_key(variant[i]) for variant in palettes): i
+               for i in range(len(palettes[0]))}
     blocks = {tuple(map(int, entry["pos"])): entry for entry in root["blocks"]}
     for change in changes:
         pos = change["pos"]
@@ -126,12 +151,19 @@ def set_blocks(root, changes: list[dict]) -> None:
         if change.get("name") is None:
             blocks.pop(key, None)
             continue
-        entry_state = state(change["name"], change.get("properties"))
-        palette_key = _key(entry_state)
+        primary = {"name": change["name"], "properties": change.get("properties")}
+        variants = change.get("variants")
+        if variants is not None:
+            if len(variants) != len(palettes):
+                raise ValueError("Block variant count does not match structure palette_count")
+            if _key(state(**variants[0])) != _key(state(**primary)):
+                raise ValueError("The first variant must match name and properties")
+        entries = [state(**item) for item in (variants or [primary] * len(palettes))]
+        palette_key = tuple(_key(entry) for entry in entries)
         if palette_key not in palette:
             palette[palette_key] = len(palettes[0])
-            for variant in palettes:
-                variant.append(deepcopy(entry_state))
+            for variant, entry in zip(palettes, entries):
+                variant.append(entry)
         block = Compound({"pos": _vec(pos), "state": Int(palette[palette_key])})
         if change.get("nbt") is not None:
             block["nbt"] = _parse_nbt(change["nbt"])
@@ -232,17 +264,119 @@ def render_svg(root, y: int, offset_x: int = 0, offset_z: int = 0,
     return "".join(parts)
 
 
+def render_3d_html(root, offset_x: int = 0, offset_y: int = 0, offset_z: int = 0,
+                   width: int = 48, height: int = 48, depth: int = 48,
+                   palette_index: int = 0) -> str:
+    """Offline interactive 3D viewport; coordinates and block IDs remain inspectable."""
+    size = check(root)
+    palettes = _palettes(root)
+    if not 0 <= palette_index < len(palettes):
+        raise ValueError("palette_index outside available variants")
+    if any(type(v) is not int or v < 0 for v in (offset_x, offset_y, offset_z)):
+        raise ValueError("Offsets must be nonnegative integers")
+    if any(type(v) is not int or not 1 <= v <= 96 for v in (width, height, depth)):
+        raise ValueError("Viewport dimensions must each be between 1 and 96")
+    origin = (offset_x, offset_y, offset_z)
+    span = (width, height, depth)
+    names = [str(p["Name"]) for p in palettes[palette_index]]
+    air = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air"}
+    blocks = []
+    for b in root["blocks"]:
+        pos = tuple(map(int, b["pos"]))
+        state_id = int(b["state"])
+        if (names[state_id] not in air and
+                all(origin[i] <= pos[i] < origin[i] + span[i] for i in range(3))):
+            blocks.append([*(pos[i] - origin[i] for i in range(3)), state_id])
+    if len(blocks) > 120_000:
+        raise ValueError("3D viewport contains over 120000 blocks; reduce width/height/depth")
+    entities = []
+    for entry in root.get("entities", []):
+        pos = tuple(map(float, entry["pos"]))
+        if all(origin[i] <= pos[i] < origin[i] + span[i] for i in range(3)):
+            entities.append([*(pos[i] - origin[i] for i in range(3)),
+                             str(entry.get("nbt", {}).get("id", "unknown"))])
+    payload = {"size": list(size), "origin": origin, "span": span,
+               "paletteIndex": palette_index, "paletteCount": len(palettes),
+               "names": names, "blocks": blocks, "entities": entities}
+    # Escape '<' so untrusted NBT names cannot terminate the script element.
+    data = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("<", "\\u003c")
+    template = files("minecraft_structure_mcp").joinpath("data/preview_3d.html").read_text(encoding="utf-8")
+    return template.replace("/*STRUCTURE_DATA*/", data)
+
+
+def split(root, chunk_size: list[int] | tuple[int, int, int] = (48, 48, 48)) -> list[tuple[tuple[int, int, int], nbtlib.File]]:
+    """Partition an oversized template into placeable-size NBT templates."""
+    size = check(root)
+    tile = _size(chunk_size)
+    if any(v > 48 for v in tile):
+        raise ValueError("Each chunk dimension must be at most 48")
+    capacity = 1
+    for i in range(3):
+        capacity *= (size[i] + tile[i] - 1) // tile[i]
+    if capacity > 10_000:
+        raise ValueError("Structure would require more than 10000 pieces")
+    groups: dict[tuple[int, int, int], dict[str, list]] = {}
+    def get_group(key):
+        return groups.setdefault(key, {"blocks": [], "entities": []})
+    for block in root["blocks"]:
+        pos = tuple(map(int, block["pos"]))
+        key = tuple(pos[i] // tile[i] for i in range(3))
+        get_group(key)["blocks"].append(block)
+    for entity in root.get("entities", []):
+        block_pos = tuple(map(int, entity.get("blockPos", [int(v // 1) for v in entity["pos"]])))
+        anchor = tuple(min(size[i] - 1, max(0, block_pos[i])) for i in range(3))
+        key = tuple(anchor[i] // tile[i] for i in range(3))
+        get_group(key)["entities"].append(entity)
+    result = []
+    for index, group in sorted(groups.items()):
+        origin = tuple(index[i] * tile[i] for i in range(3))
+        length = tuple(min(tile[i], size[i] - origin[i]) for i in range(3))
+        header = {key: deepcopy(value) for key, value in root.items()
+                  if key not in ("size", "blocks", "entities")}
+        header["size"] = _vec(length)
+        header["blocks"] = List[Compound]()
+        header["entities"] = List[Compound]()
+        chunk = nbtlib.File(Compound(header), root_name=root.root_name)
+        for original in group["blocks"]:
+            entry = deepcopy(original)
+            entry["pos"] = _vec([int(entry["pos"][i]) - origin[i] for i in range(3)])
+            payload = entry.get("nbt")
+            if payload and all(axis in payload for axis in ("x", "y", "z")):
+                for i, axis in enumerate(("x", "y", "z")):
+                    payload[axis] = type(payload[axis])(int(payload[axis]) - origin[i])
+            chunk["blocks"].append(entry)
+        for original in group["entities"]:
+            entry = deepcopy(original)
+            entry["pos"] = _vec([float(entry["pos"][i]) - origin[i] for i in range(3)], Double)
+            if "blockPos" in entry:
+                entry["blockPos"] = _vec([int(entry["blockPos"][i]) - origin[i] for i in range(3)])
+            payload = entry.get("nbt")
+            if payload:
+                if "Pos" in payload and len(payload["Pos"]) == 3:
+                    for i in range(3):
+                        payload["Pos"][i] = type(payload["Pos"][i])(float(payload["Pos"][i]) - origin[i])
+                if all(axis in payload for axis in ("TileX", "TileY", "TileZ")):
+                    for i, axis in enumerate(("TileX", "TileY", "TileZ")):
+                        payload[axis] = type(payload[axis])(int(payload[axis]) - origin[i])
+            chunk["entities"].append(entry)
+        check(chunk)
+        result.append((origin, chunk))
+    return result
+
+
 def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
     check(before)
     check(after)
     if offset < 0 or limit < 1 or limit > 5000:
         raise ValueError("offset >= 0 and 1 <= limit <= 5000 required")
     def mapping(root):
-        palette = _palettes(root)[0]
-        return {tuple(map(int, b["pos"])): {
-            "name": _key(palette[int(b["state"])])[0],
-            "properties": dict(_key(palette[int(b["state"])])[1]),
-            **({"nbt": b["nbt"].snbt()} if "nbt" in b else {})} for b in root["blocks"]}
+        palettes = _palettes(root)
+        def entry(block):
+            variants = [_state_json(p[int(block["state"])]) for p in palettes]
+            return {**variants[0],
+                    **({"variants": variants} if len(variants) > 1 else {}),
+                    **({"nbt": block["nbt"].snbt()} if "nbt" in block else {})}
+        return {tuple(map(int, block["pos"])): entry(block) for block in root["blocks"]}
     a, b = mapping(before), mapping(after)
     changes = [{"pos": list(pos), "before": a.get(pos), "after": b.get(pos)}
                for pos in sorted(a.keys() | b.keys()) if a.get(pos) != b.get(pos)]
@@ -251,10 +385,13 @@ def diff(before, after, offset: int = 0, limit: int = 1000) -> dict:
                         "block_pos": list(map(int, e["blockPos"])), "nbt": e["nbt"].snbt()}
                        for e in after.get("entities", [])] if entities_changed else None)
     variants_changed = (len(_palettes(before)) != len(_palettes(after)) or
-                        [p.snbt() for p in _palettes(before)[1:]] !=
-                        [p.snbt() for p in _palettes(after)[1:]])
+                        [[_key(state) for state in palette] for palette in _palettes(before)[1:]] !=
+                        [[_key(state) for state in palette] for palette in _palettes(after)[1:]])
     return {"before_size": list(map(int, before["size"])),
-            "after_size": list(map(int, after["size"])), "change_count": len(changes),
+            "after_size": list(map(int, after["size"])),
+            "before_palette_count": len(_palettes(before)),
+            "after_palette_count": len(_palettes(after)),
+            "change_count": len(changes),
             "changes": changes[offset:offset + limit],
             "entities_changed": entities_changed, "entities_after": entities_after,
             "alternate_palettes_changed": variants_changed}
@@ -287,7 +424,9 @@ def _transform_state(block_state, turns, fx, fy, fz):
             old = str(p[key])
             p[key] = String(_direction(old, turns, fx, fz))
             if fy and old in ("up", "down"):
-                p[key] = String("down" if old == "up" else "up")
+                opposite = "down" if old == "up" else "up"
+                allowed = block_schema().get(str(result["Name"]), {}).get(key, [])
+                p[key] = String(opposite if opposite in allowed else old)
     if "axis" in p and turns % 2 and str(p["axis"]) in ("x", "z"):
         p["axis"] = String("z" if str(p["axis"]) == "x" else "x")
     if "rotation" in p:
@@ -300,6 +439,13 @@ def _transform_state(block_state, turns, fx, fy, fz):
             if key in p:
                 swaps = {"top": "bottom", "bottom": "top", "upper": "lower", "lower": "upper", "up": "down", "down": "up"}
                 p[key] = String(swaps.get(str(p[key]), str(p[key])))
+        for key in ("face", "attachment"):
+            if key in p:
+                p[key] = String({"floor": "ceiling", "ceiling": "floor"}.get(str(p[key]), str(p[key])))
+        if "hanging" in p:
+            p["hanging"] = String("false" if str(p["hanging"]) == "true" else "true")
+        if "up" in p and "down" in p:
+            p["up"], p["down"] = p["down"], p["up"]
     if fx ^ fz:
         for key in ("hinge", "type"):
             if key in p and str(p[key]) in ("left", "right"):
@@ -322,6 +468,21 @@ def _transform_state(block_state, turns, fx, fy, fz):
                     if set(candidate.split("_")) == transformed:
                         p["shape"] = String(candidate)
                         break
+    if "orientation" in p:
+        parts = str(p["orientation"]).split("_")
+        if len(parts) == 2:
+            first, second = (_direction(v, turns, fx, fz) for v in parts)
+            if fy:
+                first = {"up": "down", "down": "up"}.get(first, first)
+                second = {"up": "down", "down": "up"}.get(second, second)
+            candidate = first + "_" + second
+            # Jigsaw blocks have no horizontal_down state; retain a valid
+            # orientation where vertical reflection cannot be expressed.
+            allowed = block_schema().get(str(result["Name"]), {}).get("orientation", [])
+            if candidate not in allowed and fy:
+                candidate = first + "_up"
+            if candidate in allowed:
+                p["orientation"] = String(candidate)
     # Directional connection keys (fences, walls, redstone wire).
     connections = {k: p.pop(k) for k in list(p) if k in _DIR}
     for key, value in connections.items():
@@ -361,6 +522,10 @@ def transform(root, quarter_turns: int = 0, flip_x: bool = False,
             entity["blockPos"] = _vec(point(list(map(int, entity["blockPos"]))))
         nbt = entity.get("nbt")
         if nbt:
+            if "Pos" in nbt and len(nbt["Pos"]) == 3:
+                converted = point(list(map(float, nbt["Pos"])), True)
+                for i in range(3):
+                    nbt["Pos"][i] = type(nbt["Pos"][i])(converted[i])
             if "Rotation" in nbt and len(nbt["Rotation"]) >= 2:
                 yaw = float(nbt["Rotation"][0])
                 if flip_x: yaw = -yaw

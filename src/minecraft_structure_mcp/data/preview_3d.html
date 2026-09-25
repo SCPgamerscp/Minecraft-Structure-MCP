@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Minecraft Structure 3D Preview</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101923; color: #eef5f8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; display: grid; grid-template-rows: auto minmax(300px,1fr) auto; height: 100vh; }
+  header, footer { padding: 10px 16px; background: #1c2a38; display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: center; }
+  header strong { font-size: 1.1rem; }
+  label { display: inline-flex; align-items: center; gap: 8px; }
+  input[type=range] { width: 170px; accent-color: #56c8b4; }
+  #stage { position: relative; min-height: 0; }
+  canvas { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+  #legend { display: flex; gap: 9px 16px; flex-wrap: wrap; max-height: 100px; overflow: auto; font-size: 12px; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  #hint { opacity: .75; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>構造物 3D プレビュー</strong>
+  <span id="details"></span>
+  <label>表示する最高層 Y <input id="layer" type="range" min="0" step="1"><span id="layerValue"></span></label>
+  <span id="hint">ドラッグで回転・ホイールで拡大縮小。紫の点はエンティティ。</span>
+</header>
+<div id="stage"><canvas id="view" role="img" aria-label="構造物の回転可能な3D表示"></canvas></div>
+<footer id="legend"></footer>
+<script>
+"use strict";
+const structure = /*STRUCTURE_DATA*/;
+const canvas = document.getElementById("view");
+const ctx = canvas.getContext("2d");
+const layer = document.getElementById("layer");
+const layerValue = document.getElementById("layerValue");
+const legend = document.getElementById("legend");
+let yaw = 0.7, tilt = 0.65, zoom = 1, dragging = false, lastX = 0, lastY = 0;
+layer.max = String(structure.span[1] - 1);
+layer.value = layer.max;
+document.getElementById("details").textContent =
+  `元サイズ ${structure.size.join("×")} / 表示範囲 ${structure.span.join("×")} / 起点 ${structure.origin.join(",")} / パレット ${structure.paletteIndex + 1} / ${structure.paletteCount}`;
+const count = new Map();
+for (const b of structure.blocks) count.set(b[3], (count.get(b[3]) || 0) + 1);
+const color = name => {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (Math.imul(hash, 31) + name.charCodeAt(i)) | 0;
+  return (Math.abs(hash) % 360);
+};
+for (const [id, total] of [...count].sort((a, b) => b[1] - a[1]).slice(0, 24)) {
+  const label = document.createElement("span");
+  const mark = document.createElement("span");
+  mark.className = "swatch";
+  mark.style.background = `hsl(${color(structure.names[id])},46%,52%)`;
+  label.append(mark, document.createTextNode(`${structure.names[id]} (${total})`));
+  legend.append(label);
+}
+if (structure.entities.length) {
+  const label = document.createElement("span");
+  label.textContent = `◆ エンティティ ${structure.entities.length}`;
+  legend.append(label);
+}
+function draw() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#101923";
+  ctx.fillRect(0, 0, w, h);
+  const highest = Number(layer.value);
+  layerValue.textContent = String(structure.origin[1] + highest);
+  const [sx, sy, sz] = structure.span;
+  const base = Math.max(2, Math.min(w / (sx + sz + 2), h / (sy + (sx + sz) * 0.65 + 2)));
+  const scale = base * zoom * 1.5;
+  const cos = Math.cos(yaw), sin = Math.sin(yaw);
+  const vertical = Math.sin(tilt), heightScale = Math.cos(tilt);
+  const cx = sx / 2, cy = sy / 2, cz = sz / 2;
+  const project = (x, y, z) => {
+    x -= cx; y -= cy; z -= cz;
+    return [w / 2 + (cos*x - sin*z)*scale,
+            h / 2 + ((sin*x + cos*z)*vertical - y*heightScale)*scale];
+  };
+  const cubes = structure.blocks.filter(b => b[1] <= highest);
+  const occupied = new Set(cubes.map(b => `${b[0]},${b[1]},${b[2]}`));
+  const has = (x,y,z) => occupied.has(`${x},${y},${z}`);
+  cubes.sort((a,b) => (sin*a[0]+cos*a[2]) - (sin*b[0]+cos*b[2]) || a[1] - b[1]);
+  function face(points, hue, light) {
+    ctx.beginPath();
+    const start = project(...points[0]); ctx.moveTo(...start);
+    for (let i=1; i<points.length; i++) ctx.lineTo(...project(...points[i]));
+    ctx.closePath();
+    ctx.fillStyle = `hsl(${hue},46%,${light}%)`;
+    ctx.fill();
+    ctx.strokeStyle = "rgba(7,16,24,.34)";
+    ctx.lineWidth = 0.6;
+    ctx.stroke();
+  }
+  for (const [x,y,z,id] of cubes) {
+    const hue = color(structure.names[id]);
+    if (sin >= 0 && !has(x+1,y,z)) face([[x+1,y,z],[x+1,y,z+1],[x+1,y+1,z+1],[x+1,y+1,z]], hue, 39);
+    if (sin < 0 && !has(x-1,y,z)) face([[x,y,z],[x,y,z+1],[x,y+1,z+1],[x,y+1,z]], hue, 39);
+    if (cos >= 0 && !has(x,y,z+1)) face([[x,y,z+1],[x+1,y,z+1],[x+1,y+1,z+1],[x,y+1,z+1]], hue, 48);
+    if (cos < 0 && !has(x,y,z-1)) face([[x,y,z],[x+1,y,z],[x+1,y+1,z],[x,y+1,z]], hue, 48);
+    if (!has(x,y+1,z)) face([[x,y+1,z],[x+1,y+1,z],[x+1,y+1,z+1],[x,y+1,z+1]], hue, 62);
+  }
+  ctx.font = "12px system-ui,sans-serif";
+  for (const [x,y,z,id] of structure.entities) {
+    if (y > highest + 1) continue;
+    const [px,py] = project(x,y,z);
+    ctx.fillStyle = "#ef9dff";
+    ctx.beginPath(); ctx.arc(px,py,Math.max(4,scale*0.35),0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.fillText(id,px+6,py-6);
+  }
+}
+function resize() {
+  const ratio = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(canvas.clientWidth * ratio);
+  canvas.height = Math.round(canvas.clientHeight * ratio);
+  ctx.setTransform(ratio,0,0,ratio,0,0);
+  draw();
+}
+canvas.addEventListener("pointerdown", e => { dragging = true; lastX=e.clientX; lastY=e.clientY; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointerup", () => { dragging=false; });
+canvas.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  yaw += (e.clientX-lastX)*0.009;
+  tilt = Math.max(0.25,Math.min(1.25,tilt+(e.clientY-lastY)*0.005));
+  lastX=e.clientX; lastY=e.clientY; draw();
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault(); zoom=Math.max(0.25,Math.min(6,zoom*(e.deltaY>0?0.88:1.12))); draw();
+}, {passive:false});
+layer.addEventListener("input", draw);
+new ResizeObserver(resize).observe(document.getElementById("stage"));
+resize();
+</script>
+</body>
+</html>
